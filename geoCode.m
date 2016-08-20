@@ -8,9 +8,8 @@ function [result] = geoCode(address, service, key)
 %   specified SERVICE. Valid services are
 %       google  - Google Maps  (default service)
 %       osm     - OpenStreetMap
-%       yahoo   - Yahoo! Place Finder
 %
-%   COORDS = GEOCODE( ..., SERVICE, APIKEY) allows the specifcation of an AppId
+%   COORDS = GEOCODE( ..., SERVICE, APIKEY) allows the specifcation of an
 %   API key if needed.
 
 % Copyright(c) 2012, Stuart P. Layton <stuart.layton@gmail.com>
@@ -19,11 +18,12 @@ function [result] = geoCode(address, service, key)
 % Revision History
 %   2012/08/20 - Initial Release
 %   2012/08/20 - Simplified XML parsing code
+%   2016/08/19 - fix google v3
 
 % Validate the input arguments
 
 % Check to see if address is a valid string
-if isempty(address) || ~isvector(address)
+if isempty(address) || ~ischar(address) || ~isvector(address)
     error('Invalid address provided, must be a string');
 end
 
@@ -31,6 +31,7 @@ end
 if nargin<2 || isempty(service)
     service = 'google';
 end
+service = lower(service);
 
 % if no key is specified then set it to empty, also check to see if char array
 if nargin<3
@@ -42,125 +43,73 @@ address = regexprep(address, ' ', '+');
 
 % Switch on the specified service, construct the Query URL, and specify the
 % function that will be used to parse the resulting XML
-switch lower(service)
+switch service
     case('google')
-        if isempty(key) || ~ischar(key) || ~isvector(key)
-            error('Must provide API key as a string');
+        % google will determine limit based on ip if you do not provide key
+        queryUrl = sprintf('https://maps.googleapis.com/maps/api/geocode/json?address=%s', address);
+        
+        % use key to determine based on key
+        if ~isempty(key) || ischar(key) || isvector(key)
+            queryUrl = sprintf('%s&key=%s', queryUrl, key);
+        end
+
+    case ('osm')
+        % osm will limit use if no email is provided
+        queryUrl = sprintf('http://nominatim.openstreetmap.org/search?format=json&q=%s', address);
+        
+        % add valid email to increase limit 
+        if ~isempty(key) || ischar(key) || isvector(key)
+            queryUrl = sprintf('%s&email=%s', queryUrl, key);
         end
         
-        SERVER_URL = 'https://maps.googleapis.com';
-        queryUrl = sprintf('%s/maps/api/geocode/json?address=%s&key=%s', SERVER_URL, address, key);
-        parseFcn = @parseGoogleMaps;
+        queryUrl = sprintf('%s&limit=%s', queryUrl, 1);
         
-    case('yahoo')
-        SERVER_URL = 'http://where.yahooapis.com/geocode';
-        queryUrl = sprintf('%s?location=%s',SERVER_URL, address);
+    case ('geonames')
+                % osm will limit use if no email is provided
+        queryUrl = sprintf('http://nominatim.openstreetmap.org/search?format=json&q=%s', address);
         
-        % The Yahoo docs say that an AppID is required although
-        % it appears that responses are given without a valid appid
-        % If an AppId is provided include it in the URL
-        if ~isempty(key)
-            queryUrl = sprintf('%s&appid=%s', queryUrl, key);
+        % add valid email to increase limit 
+        if ~isempty(key) || ischar(key) || isvector(key)
+            queryUrl = sprintf('%s&email=%s', queryUrl, key);
         end
         
-        parseFcn = @parseYahooLocalXML;
-        
-    case {'osm', 'openstreetmaps', 'open street maps'}
-        SERVER_URL = 'http://nominatim.openstreetmap.org/search';
-        queryUrl = sprintf('%s?format=xml&q=%s', SERVER_URL, address);
-        parseFcn = @parseOpenStreetMapXML;
-        
+        queryUrl = sprintf('%s&limit=%s', queryUrl, 1);
+        http://api.geonames.org/citiesJSON?north=44.1&south=-9.9&east=-22.4&west=55.2&lang=de&username=demo 
+
     otherwise
         error('Invalid geocoding service specified:%s', service);
 end
 
 % Switch on the specified service, choose different return type
-switch lower(service)
-    case('google') % google parsing relies on JSONLab
-        [docNode, status] = urlread(queryUrl);
-        if status == 0
-            error('Error, could not reach %s', SERVER_URL);
+switch service
+    case('google')
+        % read json file
+        docNode = webread(queryUrl);
+        % check status
+        if ~strcmp(docNode.status,'OK');
+            warning('receive data error: %s ', docNode.status);
+            warning('location: %s\n', address);
+            result = nan(2,1);
+        else
+            result = [docNode.results.geometry.location.lat, docNode.results.geometry.location.lng];
         end
+        return;
         
-    otherwise
+    case ('osm')
+        % check status
         try
-            docNode = xmlread(queryUrl);
-        catch  %#ok<CTCH>
-            error('Error, could not reach %s, is it a valid URL?', SERVER_URL);
+            docNode = webread(queryUrl);
+        catch ex
+            disp(ex);
+            error('receive data error')
         end
+        % check if data is valid
+        if isempty(docNode)
+            warning('missing data at %s\n', address)
+            result = nan(2,1);
+        else
+            result = [str2double(docNode.lat), str2double(docNode.lon)]; 
+        end
+        return;
 end
-
-result = parseFcn(docNode);
-end
-
-%% Function to parse the json response from Google Maps
-% depends on JSONLab
-function [result] = parseGoogleMaps(docNode)
-% parse Google json return file
-data  = loadjson(docNode);
-% check the status area to see if we got a valid response
-if ~strcmp(data.status, 'OK')
-    fprintf('receive data error\n');
-    result = nan(2,1);
-    return;
-end
-
-result = [data.results{1,1}.geometry.location.lat, data.results{1,1}.geometry.location.lng]; % return the latitude and longitude
-end
-
-%% Function to parse the XML response from Yahoo Local
-function [c] = parseYahooLocalXML(docNode)
-
-% check the response code to see if we got a valid response
-codeEl = docNode.getElementsByTagName('Error');
-errCode = str2double( char( codeEl.item(0).getTextContent ) );
-
-% code 0 is associated with a valid geocode xml file
-if errCode~=0
-    fprintf('No data received from server! Received code:%d\n', errCode)
-    c = nan(2,1);
-    return;
-end
-
-% check to see if a location was actually found
-foundEl = docNode.getElementsByTagName('Found');
-found = str2double( char( foundEl.item(0).getTextContent) );
-%
-if found<1
-    disp('A location with that address was not found!');
-    c = nan(2,1);
-    return;
-end
-
-
-latEl = docNode.getElementsByTagName('latitude');
-lonEl = docNode.getElementsByTagName('longitude');
-
-%make sure the xml actually included latitude and longitude tags
-if latEl.length==0 || lonEl.length==0
-    c = nan(2,1);
-    disp('No coordinates were found for that address');
-    return;
-end
-
-c(1) = str2double( char( latEl.item(0).getTextContent) );
-c(2) = str2double( char( lonEl.item(0).getTextContent) );
-
-end
-
-%% Function to parse the XML response from OpenStreetMap
-function [c] = parseOpenStreetMapXML(docNode)
-
-serverResponse = docNode.getElementsByTagName('searchresults').item(0);
-placeTag = serverResponse.getElementsByTagName('place').item(0);
-
-if isempty(placeTag)
-    disp('OpenStreeMap returned no data for that address');
-    c = nan(2,1);
-    return;
-end
-
-c(1) = str2double( char( placeTag.getAttribute('lat') ) );
-c(2) = str2double( char( placeTag.getAttribute('lon') ) );
-
 end

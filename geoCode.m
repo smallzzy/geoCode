@@ -1,4 +1,4 @@
-function [c] = geoCode(address, service, key)
+function [result] = geoCode(address, service, key)
 %GEOCODE look up the latitude and longitude of a an address
 %
 %   COORDS = GEOCODE( ADDRESS ) returns the geocoded latitude and longitude
@@ -20,11 +20,10 @@ function [c] = geoCode(address, service, key)
 %   2012/08/20 - Initial Release
 %   2012/08/20 - Simplified XML parsing code
 
-
 % Validate the input arguments
 
 % Check to see if address is a valid string
-if isempty(address) || ~ischar(address) || ~isvector(address)
+if isempty(address) || ~isvector(address)
     error('Invalid address provided, must be a string');
 end
 
@@ -38,16 +37,20 @@ if nargin<3
     key = [];
 end
 
-%replace white spaces in the address with '+'
+% replace white spaces in the address with '+'
 address = regexprep(address, ' ', '+');
 
 % Switch on the specified service, construct the Query URL, and specify the
 % function that will be used to parse the resulting XML
 switch lower(service)
     case('google')
-        SERVER_URL = 'http://maps.google.com';
-        queryUrl = sprintf('%s/maps/geo?output=xml&q=%s',SERVER_URL, address);
-        parseFcn = @parseGoogleMapsXML;
+        if isempty(key) || ~ischar(key) || ~isvector(key)
+            error('Must provide API key as a string');
+        end
+        
+        SERVER_URL = 'https://maps.googleapis.com';
+        queryUrl = sprintf('%s/maps/api/geocode/json?address=%s&key=%s', SERVER_URL, address, key);
+        parseFcn = @parseGoogleMaps;
         
     case('yahoo')
         SERVER_URL = 'http://where.yahooapis.com/geocode';
@@ -62,9 +65,7 @@ switch lower(service)
         
         parseFcn = @parseYahooLocalXML;
         
-        
     case {'osm', 'openstreetmaps', 'open street maps'}
-        
         SERVER_URL = 'http://nominatim.openstreetmap.org/search';
         queryUrl = sprintf('%s?format=xml&q=%s', SERVER_URL, address);
         parseFcn = @parseOpenStreetMapXML;
@@ -73,48 +74,44 @@ switch lower(service)
         error('Invalid geocoding service specified:%s', service);
 end
 
-try
-    docNode = xmlread(queryUrl);
-catch  %#ok<CTCH>
-    error('Error, could not reach %s, is it a valid URL?', SERVER_URL);
+% Switch on the specified service, choose different return type
+switch lower(service)
+    case('google') % google parsing relies on JSONLab
+        [docNode, status] = urlread(queryUrl);
+        if status == 0
+            error('Error, could not reach %s', SERVER_URL);
+        end
+        
+    otherwise
+        try
+            docNode = xmlread(queryUrl);
+        catch  %#ok<CTCH>
+            error('Error, could not reach %s, is it a valid URL?', SERVER_URL);
+        end
 end
 
-c = parseFcn(docNode);
+result = parseFcn(docNode);
 end
 
-% Function to parse the XML response from Google Maps
-function [c] = parseGoogleMapsXML(docNode)
-
-%check the response code to see if we got a valid response
-codeEl = docNode.getElementsByTagName('code');
-errCode = str2double( char( codeEl.item(0).getTextContent ) );
-% code 200 is associated with a valid geocode xml file
-if errCode~=200
-    fprintf('No data received from server! Received code:%d\n', errCode)
-    c = nan(2,1);
+%% Function to parse the json response from Google Maps
+% depends on JSONLab
+function [result] = parseGoogleMaps(docNode)
+% parse Google json return file
+data  = loadjson(docNode);
+% check the status area to see if we got a valid response
+if ~strcmp(data.status, 'OK')
+    fprintf('receive data error\n');
+    result = nan(2,1);
     return;
 end
 
-%get the 'coordinates' element from the document
-cordEl = docNode.getElementsByTagName('coordinates');
-
-%make sure the xml actually included a coordinates tag
-if cordEl.length<1
-    c = nan(2,1);
-    warning('No coordinates returned for the specified address');
-    return;
+result = [data.results{1,1}.geometry.location.lat, data.results{1,1}.geometry.location.lng]; % return the latitude and longitude
 end
 
-% get the coordinates from the first node, convert them to numbers
-coords = cellfun(@str2double, regexp( char( cordEl.item(0).getTextContent), ',', 'split'));
-
-c = coords([2, 1]); % return the latitude and longitude
-end
-
-% Function to parse the XML response from Yahoo Local
+%% Function to parse the XML response from Yahoo Local
 function [c] = parseYahooLocalXML(docNode)
 
-%check the response code to see if we got a valid response
+% check the response code to see if we got a valid response
 codeEl = docNode.getElementsByTagName('Error');
 errCode = str2double( char( codeEl.item(0).getTextContent ) );
 
@@ -125,7 +122,7 @@ if errCode~=0
     return;
 end
 
-%check to see if a location was actually found
+% check to see if a location was actually found
 foundEl = docNode.getElementsByTagName('Found');
 found = str2double( char( foundEl.item(0).getTextContent) );
 %
@@ -151,7 +148,7 @@ c(2) = str2double( char( lonEl.item(0).getTextContent) );
 
 end
 
-% Function to parse the XML response from OpenStreetMap
+%% Function to parse the XML response from OpenStreetMap
 function [c] = parseOpenStreetMapXML(docNode)
 
 serverResponse = docNode.getElementsByTagName('searchresults').item(0);
@@ -165,15 +162,5 @@ end
 
 c(1) = str2double( char( placeTag.getAttribute('lat') ) );
 c(2) = str2double( char( placeTag.getAttribute('lon') ) );
-
-end
-
-
-function elementText = GetElementText(resultNode,elementName)
-% GETELEMENTTEXT given a result node and an element name
-% returns the text within that node as a Matlab CHAR array
-
-elementText = ...
-    char( resultNode.getElementsByTagName(elementName).item(0).getTextContent );
 
 end
